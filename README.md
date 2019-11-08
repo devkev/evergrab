@@ -3,6 +3,8 @@ evergrab
 
 Fetch all failed logs of the given Evergreen patch build(s).
 
+Useful when you have failures across a range of suites, and you want to know how many are actually the same thing.
+
 Usage
 -----
 ```
