@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+#
+# Fetch all failed logs of the given Evergreen patch build(s).
+#
+# Usage:
+#   evergrab <url_to_configured_patch_build>
+
+import time
+import argparse
+import sys
+import pprint
+from urllib.request import urlopen
+import os
+import yaml
+import re
+from concurrent.futures import ThreadPoolExecutor
+from requests_futures.sessions import FuturesSession
+import requests
+import os.path
+
+
+PRINT_RESPONSES = 'EVERGRAB_PRINT_RESPONSES' in os.environ
+
+DEFAULT_MAX_REQUESTS = 20
+MAX_REQUESTS = os.environ.get('EVERGRAB_MAX_REQUESTS', DEFAULT_MAX_REQUESTS)
+
+#DEFAULT_DOWNLOAD_CHUNK_SIZE = 8192
+DEFAULT_DOWNLOAD_CHUNK_SIZE = 100 * 1024
+#DEFAULT_DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+DOWNLOAD_CHUNK_SIZE = os.environ.get('EVERGRAB_DOWNLOAD_CHUNK_SIZE', DEFAULT_DOWNLOAD_CHUNK_SIZE)
+
+DEFAULT_TASK_TEST_LIMIT = 10000
+TASK_TEST_LIMIT = os.environ.get('EVERGRAB_TASK_TEST_LIMIT', DEFAULT_TASK_TEST_LIMIT)
+
+DEFAULT_LOGS_DIR = "logs"
+LOGS_DIR = os.environ.get('EVERGRAB_LOGS_DIR', DEFAULT_LOGS_DIR)
+
+DEFAULT_URL_BASE = "https://evergreen.mongodb.com"
+
+
+executor = ThreadPoolExecutor(max_workers=MAX_REQUESTS)
+session = FuturesSession(executor=executor)
+
+patch_url_re = re.compile(r"^((https?://).*)/version/([0-9a-f]+)$")
+def get_patch_id(s):
+    match = patch_url_re.match(s)
+    if match:
+        return match.group(1), match.group(3)
+    else:
+        return DEFAULT_URL_BASE, s
+
+def get_creds_from_config_file():
+    with open(os.environ["HOME"] + "/.evergreen.yml") as stream:
+        config = yaml.safe_load(stream)
+        global API_CREDENTIALS
+        API_CREDENTIALS = {"Api-User": config["user"], "Api-Key": config["api_key"]}
+
+def evg_request(base_url, endpoint, api_version = 2, params = None, backend = requests):
+    return backend.get(url=f"{base_url}/rest/v{api_version}/{endpoint}", params=params, headers=API_CREDENTIALS)
+
+# version_id can also be a patch_id
+def get_version(base_url, version_id):
+    start = time.time()
+    print(f"Checking version {version_id}")
+    r = evg_request(base_url, f"/versions/{version_id}")
+    if PRINT_RESPONSES:
+        print(r)
+    version = r.json()
+
+    print(f"  Version ID: {version_id}")
+    print(f"  Project: {version['project']}")
+    print(f"  Description: {version['message']}")
+    print(f"  Author: {version['author']}")
+    print(f"  Status: {version['status']}")
+    print(f"  Build variants: {len(version['build_variants_status'])}")
+    end = time.time()
+    print(f"Found 1 version in {(end - start):.2f} secs")
+
+    if PRINT_RESPONSES:
+        pprint.pprint(version)
+    return version
+
+def is_interesting(thing):
+    return thing["status"] != 'success' and thing['status'] != 'undispatched'
+
+def get_failed_tasks(base_url, build_variants):
+    print()
+    print(f"Checking {len(build_variants)} build variants...")
+
+    start = time.time()
+
+    urls = (f"/builds/{build_variant['build_id']}" for build_variant in build_variants)
+    futures = (evg_request(base_url, url, backend=session) for url in urls)
+
+    num_failed_build_variants = 0
+    failed_tasks = []
+    uncached_tasks = []
+    for build_variant, future in zip(build_variants, futures):
+        response = future.result()
+        build = response.json()
+        if PRINT_RESPONSES:
+            pprint.pprint(build)
+
+        if is_interesting(build):
+            num_failed_build_variants = num_failed_build_variants + 1
+            num_cached_tasks = 0
+            num_cached_failed_tasks = 0
+
+            task_cache = {}
+            for task in build["task_cache"]:
+                task_cache[task["id"]] = task
+            for task_id in build["tasks"]:
+                # check if the task is in the task_cache
+                if task_id in task_cache:
+                    task = task_cache[task_id]
+                    num_cached_tasks = num_cached_tasks + 1
+                    if is_interesting(task):
+                        num_cached_failed_tasks = num_cached_failed_tasks + 1
+                        failed_tasks.append(task_id)
+                else:
+                    uncached_tasks.append(task_id)
+            print(f"  Failed build variant: {len(build['tasks'])} total tasks, {num_cached_tasks} cached, {num_cached_failed_tasks} failed cached, {len(uncached_tasks)} uncached, build variant: {build_variant['build_variant']}")
+        #pprint.pprint(build)
+    end = time.time()
+    print(f"Found {num_failed_build_variants} failed build variants in {(end - start):.2f} secs")
+
+    if PRINT_RESPONSES:
+        pprint.pprint(failed_tasks)
+        pprint.pprint(uncached_tasks)
+    return (failed_tasks, uncached_tasks)
+
+def normalise_test_file(test_file):
+    return test_file.replace('\\', '/')
+
+def sanitise_test_file(test_file):
+    s = test_file
+    s = normalise_test_file(s)
+    if s.endswith(".js"):
+        s = s[:len(s)-3]
+    s = s.replace('/', '_')
+    return s
+
+def sanitise_patch_message(message):
+    s = message
+    s = s.replace('\\', '_')
+    s = s.replace('/', '_')
+    s = s.replace(' ', '_')
+    s = s.replace(':', '_')
+    return s
+
+def update_download_stats(final=False):
+    global total_downloads
+    global downloads_started
+    global downloads_finished
+    end = '\n' if final else '\r'
+    print(f"Total: {total_downloads}, started: {downloads_started}, finished: {downloads_finished}, complete: {int((downloads_finished/total_downloads)*100)}%", end = end)
+
+def download_file(download):
+    global total_downloads
+    global downloads_started
+    global downloads_finished
+    try:
+        #print(f"downloading {download['filename']}")
+        with requests.get(download["url"], stream=True) as r:
+            r.raise_for_status()
+            os.makedirs(os.path.dirname(download["filename"]), exist_ok=True)
+            with open(download["filename"], 'wb') as f:
+                downloads_started = downloads_started + 1
+                for chunk in r.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                    if chunk: # filter out keep-alive new chunks
+                        f.write(chunk)
+    finally:
+        downloads_finished = downloads_finished + 1
+
+def parallel_downloads(downloads):
+    global total_downloads
+    global downloads_started
+    global downloads_finished
+    total_downloads = len(downloads)
+    downloads_started = 0
+    downloads_finished = 0
+    return executor.map(download_file, downloads)
+
+def check_patch(info):
+    base_url, patch_id = info
+
+    overall_start = time.time()
+
+    version = get_version(base_url, patch_id)
+    if not is_interesting(version):
+        print("Patch isn't interesting (succeeded or undispatched), skipping")
+        return
+
+    failed_tasks, uncached_tasks = get_failed_tasks(base_url, version["build_variants_status"])
+    #pprint.pprint(failed_tasks)
+    #pprint.pprint(uncached_tasks)
+    tasks = failed_tasks + uncached_tasks
+
+    print()
+    print(f"Checking {len(tasks)} tasks ({len(failed_tasks)} known failed, and {len(uncached_tasks)} uncached)...")
+
+    start = time.time()
+
+    futures = (evg_request(base_url, f"/tasks/{task_id}/tests", params={"limit": TASK_TEST_LIMIT,"status": "fail"}, backend=session) for task_id in tasks)
+
+    all_tests = []
+    failed_test_files = {}
+    for task_id, future in zip(tasks, futures):
+        response = future.result()
+        tests = response.json()
+        if PRINT_RESPONSES:
+            print(response)
+            pprint.pprint(tests)
+        if "error" not in tests:
+            print(f"    Found {len(tests)} failed tests in task: {task_id}")
+            for test in tests:
+                test_file = normalise_test_file(test["test_file"])
+                print(f"      {test_file}")
+                if test_file in failed_test_files:
+                    failed_test_files[test_file] = failed_test_files[test_file] + 1
+                else:
+                    failed_test_files[test_file] = 1
+            all_tests = all_tests + tests
+    end = time.time()
+    print(f"Found {len(all_tests)} total failed tests in {(end - start):.2f} secs")
+    print()
+    print("Distribution of failed test files:");
+    for failed_test_file in failed_test_files.keys():
+        print(f"  {failed_test_files[failed_test_file]} {failed_test_file}")
+    print()
+    #pprint.pprint(all_tests)
+
+    logs_base_dir = f"{LOGS_DIR}/{version['project']}/{sanitise_patch_message(version['message'])}"
+
+    test_log_downloads = [{"url":test['logs']['url_raw'],"filename":f"{logs_base_dir}/{test['task_id']}/{sanitise_test_file(test['test_file'])}"} for test in all_tests]
+    job_log_urls = list(
+        set([u[:u.find("/test/")] + "/all?raw=1" for u in (dl["url"] for dl in test_log_downloads)]))
+    job_log_downloads = [{"url":url,"filename":f"{logs_base_dir}/job/{url[url.find('/build/')+7:url.rfind('/all')]}"} for url in job_log_urls]
+
+    all_downloads = test_log_downloads + job_log_downloads
+
+    #pprint.pprint(test_log_downloads)
+    #pprint.pprint(job_log_downloads)
+
+    print(f"Fetching {len(all_downloads)} logs ({len(test_log_downloads)} test logs and {len(job_log_urls)} job logs)...")
+    print(f"Log output dir: {logs_base_dir}")
+    os.makedirs(logs_base_dir, exist_ok=True)
+
+    start = time.time()
+    results = parallel_downloads(all_downloads)
+    for result in results:
+        update_download_stats()
+    update_download_stats(final=True)
+    end = time.time()
+    print(f"Downloaded {len(all_downloads)} logs in {(end - start):.2f} secs")
+
+    overall_end = time.time()
+    print()
+    print(f"Grabbed patch \"{version['message']}\" ({patch_id}) in {(overall_end - overall_start):.2f} secs")
+
+
+if __name__ == "__main__":
+
+    # Must provide Evergreen credentials in ~/.evergreen.yml
+    get_creds_from_config_file()
+
+    for arg in sys.argv[1:]:
+        #check_task(arg)
+        check_patch(get_patch_id(arg))
