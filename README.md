@@ -1,14 +1,14 @@
 evergrab
 ========
 
-Fetch all failed logs of the given Evergreen patch build(s).
+Fetch all failed logs of the given Evergreen patch build(s) or version(s).
 
 Useful when you have failures across a range of suites, and you want to know how many are actually the same thing.
 
 Usage
 -----
 ```
-evergrab <url_to_configured_patch_build>
+evergrab <url_to_configured_patch_build_or_version>
 ```
 
 Demo

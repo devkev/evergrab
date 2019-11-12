@@ -41,9 +41,9 @@ DEFAULT_URL_BASE = "https://evergreen.mongodb.com"
 executor = ThreadPoolExecutor(max_workers=MAX_REQUESTS)
 session = FuturesSession(executor=executor)
 
-patch_url_re = re.compile(r"^((https?://).*)/version/([0-9a-f]+)$")
-def get_patch_id(s):
-    match = patch_url_re.match(s)
+version_url_re = re.compile(r"^((https?://).*)/version/([^/]+)$")
+def get_version_id_from_url(s):
+    match = version_url_re.match(s)
     if match:
         return match.group(1), match.group(3)
     else:
@@ -181,12 +181,13 @@ def parallel_downloads(downloads):
     downloads_finished = 0
     return executor.map(download_file, downloads)
 
-def check_patch(info):
-    base_url, patch_id = info
+# version_id can also be a patch_id
+def check_version(info):
+    base_url, version_id = info
 
     overall_start = time.time()
 
-    version = get_version(base_url, patch_id)
+    version = get_version(base_url, version_id)
     if not is_interesting(version):
         print("Patch isn't interesting (succeeded or undispatched), skipping")
         return
@@ -256,7 +257,7 @@ def check_patch(info):
 
     overall_end = time.time()
     print()
-    print(f"Grabbed patch \"{version['message']}\" ({patch_id}) in {(overall_end - overall_start):.2f} secs")
+    print(f"Grabbed patch \"{version['message']}\" ({version_id}) in {(overall_end - overall_start):.2f} secs")
 
 
 if __name__ == "__main__":
@@ -266,4 +267,4 @@ if __name__ == "__main__":
 
     for arg in sys.argv[1:]:
         #check_task(arg)
-        check_patch(get_patch_id(arg))
+        check_version(get_version_id_from_url(arg))
