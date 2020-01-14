@@ -232,7 +232,7 @@ def check_patch(info):
 
     logs_base_dir = f"{LOGS_DIR}/{version['project']}/{sanitise_patch_message(version['message'])}"
 
-    test_log_downloads = [{"url":test['logs']['url_raw'],"filename":f"{logs_base_dir}/{test['task_id']}/{sanitise_test_file(test['test_file'])}"} for test in all_tests]
+    test_log_downloads = [{"url":test['logs']['url_raw'],"filename":f"{logs_base_dir}/{test['task_id']}/{sanitise_test_file(test['test_file'])}_{test['logs']['url'][test['logs']['url'].rindex('/')+1:]}"} for test in all_tests]
     job_log_urls = list(
         set([u[:u.find("/test/")] + "/all?raw=1" for u in (dl["url"] for dl in test_log_downloads)]))
     job_log_downloads = [{"url":url,"filename":f"{logs_base_dir}/job/{url[url.find('/build/')+7:url.rfind('/all')]}"} for url in job_log_urls]
