@@ -226,7 +226,8 @@ def check_version(info):
     print(f"Found {len(all_tests)} total failed tests in {(end - start):.2f} secs")
     print()
     print("Distribution of failed test files:");
-    for failed_test_file in failed_test_files.keys():
+    failed_test_files_sorted = [k for k, v in sorted(failed_test_files.items(), key=lambda item: item[1])]
+    for failed_test_file in failed_test_files_sorted:
         print(f"  {failed_test_files[failed_test_file]} {failed_test_file}")
     print()
     #pprint.pprint(all_tests)
