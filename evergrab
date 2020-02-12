@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from requests_futures.sessions import FuturesSession
 import requests
 import os.path
+import traceback
 
 
 PRINT_RESPONSES = 'EVERGRAB_PRINT_RESPONSES' in os.environ
@@ -34,6 +35,9 @@ TASK_TEST_LIMIT = os.environ.get('EVERGRAB_TASK_TEST_LIMIT', DEFAULT_TASK_TEST_L
 
 DEFAULT_LOGS_DIR = "logs"
 LOGS_DIR = os.environ.get('EVERGRAB_LOGS_DIR', DEFAULT_LOGS_DIR)
+
+DEFAULT_MAX_DOWNLOAD_ATTEMPTS = 3
+MAX_DOWNLOAD_ATTEMPTS = os.environ.get('EVERGRAB_MAX_DOWNLOAD_ATTEMPTS', DEFAULT_MAX_DOWNLOAD_ATTEMPTS)
 
 DEFAULT_URL_BASE = "https://evergreen.mongodb.com"
 
@@ -152,33 +156,56 @@ def update_download_stats(final=False):
     global total_downloads
     global downloads_started
     global downloads_finished
+    global download_retries
+    global download_failures
     end = '\n' if final else '\r'
-    print(f"Total: {total_downloads}, started: {downloads_started}, finished: {downloads_finished}, complete: {int((downloads_finished/total_downloads)*100)}%", end = end)
+    print(f"Total: {total_downloads}, started: {downloads_started}, finished: {downloads_finished}, complete: {int((downloads_finished/total_downloads)*100)}%, retries: {download_retries}, failures: {download_failures}", end = end)
 
 def download_file(download):
     global total_downloads
     global downloads_started
     global downloads_finished
-    try:
-        #print(f"downloading {download['filename']}")
-        with requests.get(download["url"], stream=True) as r:
-            r.raise_for_status()
-            os.makedirs(os.path.dirname(download["filename"]), exist_ok=True)
-            with open(download["filename"], 'wb') as f:
-                downloads_started = downloads_started + 1
-                for chunk in r.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
-                    if chunk: # filter out keep-alive new chunks
-                        f.write(chunk)
-    finally:
-        downloads_finished = downloads_finished + 1
+    global download_retries
+    global download_failures
+    attempts = 0
+    while True:
+        try:
+            #print(f"downloading {download['filename']}")
+            with requests.get(download["url"], stream=True) as r:
+                r.raise_for_status()
+                os.makedirs(os.path.dirname(download["filename"]), exist_ok=True)
+                with open(download["filename"], 'wb') as f:
+                    downloads_started = downloads_started + 1
+                    for chunk in r.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                        if chunk: # filter out keep-alive new chunks
+                            f.write(chunk)
+            update_download_stats()
+            break
+        except requests.exceptions.RequestException as e:
+            attempts = attempts + 1
+            download_retries = download_retries + 1
+            if attempts > MAX_DOWNLOAD_ATTEMPTS:
+                download_failures = download_failures + 1
+                update_download_stats(final=True)
+                traceback.print_exc()
+                print(e)
+                print(str(e))
+                print(f"Failed: {download['filename']}")
+                break
+            update_download_stats()
+    downloads_finished = downloads_finished + 1
 
 def parallel_downloads(downloads):
     global total_downloads
     global downloads_started
     global downloads_finished
+    global download_retries
+    global download_failures
     total_downloads = len(downloads)
     downloads_started = 0
     downloads_finished = 0
+    download_retries = 0
+    download_failures = 0
     return executor.map(download_file, downloads)
 
 # version_id can also be a patch_id
