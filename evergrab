@@ -18,6 +18,7 @@ from requests_futures.sessions import FuturesSession
 import requests
 import os.path
 import traceback
+import collections
 
 
 PRINT_RESPONSES = 'EVERGRAB_PRINT_RESPONSES' in os.environ
@@ -239,7 +240,7 @@ def check_version(info):
         if PRINT_RESPONSES:
             print(response)
             pprint.pprint(tests)
-        if "error" not in tests:
+        if not ("error" in tests or ("status" in tests and tests["status"] >= 400)):
             print(f"    Found {len(tests)} failed tests in task: {task_id}")
             for test in tests:
                 test_file = normalise_test_file(test["test_file"])
