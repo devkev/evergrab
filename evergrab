@@ -47,12 +47,27 @@ executor = ThreadPoolExecutor(max_workers=MAX_REQUESTS)
 session = FuturesSession(executor=executor)
 
 version_url_re = re.compile(r"^((https?://).*)/version/([^/]+)$")
+task_url_re = re.compile(r"^((https?://).*)/task/([^/#]+)(#.*)?$")
+
 def get_version_id_from_url(s):
     match = version_url_re.match(s)
     if match:
         return match.group(1), match.group(3)
     else:
         return DEFAULT_URL_BASE, s
+
+def get_task_id_from_url(s):
+    match = task_url_re.match(s)
+    if match:
+        return match.group(1), match.group(3)
+    else:
+        return DEFAULT_URL_BASE, s
+
+def is_version_url(s):
+    return bool(version_url_re.match(s))
+
+def is_task_url(s):
+    return bool(task_url_re.match(s))
 
 def get_creds_from_config_file():
     with open(os.environ["HOME"] + "/.evergreen.yml") as stream:
@@ -209,31 +224,16 @@ def parallel_downloads(downloads):
     download_failures = 0
     return executor.map(download_file, downloads)
 
-# version_id can also be a patch_id
-def check_version(info):
-    base_url, version_id = info
+def get_tasks(base_url, tasks, logs_base_dir):
 
-    overall_start = time.time()
-
-    version = get_version(base_url, version_id)
-    if not is_interesting(version):
-        print("Patch isn't interesting (succeeded or undispatched), skipping")
-        return
-
-    failed_tasks, uncached_tasks = get_failed_tasks(base_url, version["build_variants_status"])
-    #pprint.pprint(failed_tasks)
-    #pprint.pprint(uncached_tasks)
-    tasks = failed_tasks + uncached_tasks
-
-    print()
-    print(f"Checking {len(tasks)} tasks ({len(failed_tasks)} known failed, and {len(uncached_tasks)} uncached)...")
+    print(f"Checking {len(tasks)} tasks...")
 
     start = time.time()
 
     futures = (evg_request(base_url, f"/tasks/{task_id}/tests", params={"limit": TASK_TEST_LIMIT,"status": "fail"}, backend=session) for task_id in tasks)
 
     all_tests = []
-    failed_test_files = {}
+    interesting_test_files = {}
     for task_id, future in zip(tasks, futures):
         response = future.result()
         tests = response.json()
@@ -245,22 +245,20 @@ def check_version(info):
             for test in tests:
                 test_file = normalise_test_file(test["test_file"])
                 print(f"      {test_file}")
-                if test_file in failed_test_files:
-                    failed_test_files[test_file] = failed_test_files[test_file] + 1
+                if test_file in interesting_test_files:
+                    interesting_test_files[test_file] = interesting_test_files[test_file] + 1
                 else:
-                    failed_test_files[test_file] = 1
+                    interesting_test_files[test_file] = 1
             all_tests = all_tests + tests
     end = time.time()
-    print(f"Found {len(all_tests)} total failed tests in {(end - start):.2f} secs")
+    print(f"Found {len(all_tests)} total interesting tests in {(end - start):.2f} secs")
     print()
-    print("Distribution of failed test files:");
-    failed_test_files_sorted = [k for k, v in sorted(failed_test_files.items(), key=lambda item: item[1])]
-    for failed_test_file in failed_test_files_sorted:
-        print(f"  {failed_test_files[failed_test_file]} {failed_test_file}")
+    print("Distribution of interesting test files:");
+    interesting_test_files_sorted = [k for k, v in sorted(interesting_test_files.items(), key=lambda item: item[1])]
+    for interesting_test_file in interesting_test_files_sorted:
+        print(f"  {interesting_test_files[interesting_test_file]} {interesting_test_file}")
     print()
     #pprint.pprint(all_tests)
-
-    logs_base_dir = f"{LOGS_DIR}/{version['project']}/{sanitise_patch_message(version['message'])}"
 
     test_log_downloads = [{"url":test['logs']['url_raw'],"filename":f"{logs_base_dir}/{test['task_id']}/{sanitise_test_file(test['test_file'])}_{test['logs']['url'][test['logs']['url'].rindex('/')+1:]}"} for test in all_tests]
     job_log_urls = list(
@@ -284,9 +282,51 @@ def check_version(info):
     end = time.time()
     print(f"Downloaded {len(all_downloads)} logs in {(end - start):.2f} secs")
 
+
+# version_id can also be a patch_id
+def check_version(info):
+    base_url, version_id = info
+
+    overall_start = time.time()
+
+    version = get_version(base_url, version_id)
+    if not is_interesting(version):
+        print("Patch isn't interesting (succeeded or undispatched), skipping")
+        return
+
+    failed_tasks, uncached_tasks = get_failed_tasks(base_url, version["build_variants_status"])
+    #pprint.pprint(failed_tasks)
+    #pprint.pprint(uncached_tasks)
+    tasks = failed_tasks + uncached_tasks
+
+    print()
+    print(f"Checking {len(tasks)} tasks ({len(failed_tasks)} known failed, and {len(uncached_tasks)} uncached)...")
+
+    logs_base_dir = f"{LOGS_DIR}/{version['project']}/{sanitise_patch_message(version['message'])}"
+
+    get_tasks(base_url, tasks, logs_base_dir)
+
     overall_end = time.time()
     print()
     print(f"Grabbed patch \"{version['message']}\" ({version_id}) in {(overall_end - overall_start):.2f} secs")
+
+
+def check_task(info):
+    base_url, task_id = info
+
+    overall_start = time.time()
+
+    tasks = [ task_id ]
+
+    logs_base_dir = f"{LOGS_DIR}"
+
+    print(f"Getting task {task_id}")
+
+    get_tasks(base_url, tasks, logs_base_dir)
+
+    overall_end = time.time()
+    print()
+    print(f"Grabbed task {task_id} in {(overall_end - overall_start):.2f} secs")
 
 
 if __name__ == "__main__":
@@ -295,5 +335,7 @@ if __name__ == "__main__":
     get_creds_from_config_file()
 
     for arg in sys.argv[1:]:
-        #check_task(arg)
-        check_version(get_version_id_from_url(arg))
+        if is_task_url(arg):
+            check_task(get_task_id_from_url(arg))
+        else:
+            check_version(get_version_id_from_url(arg))
