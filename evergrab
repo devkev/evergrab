@@ -40,6 +40,9 @@ LOGS_DIR = os.environ.get('EVERGRAB_LOGS_DIR', DEFAULT_LOGS_DIR)
 DEFAULT_MAX_DOWNLOAD_ATTEMPTS = 3
 MAX_DOWNLOAD_ATTEMPTS = os.environ.get('EVERGRAB_MAX_DOWNLOAD_ATTEMPTS', DEFAULT_MAX_DOWNLOAD_ATTEMPTS)
 
+DEFAULT_GET_ALL_LOGS = False
+GET_ALL_LOGS = os.environ.get('EVERGRAB_GET_ALL_LOGS', DEFAULT_GET_ALL_LOGS)
+
 DEFAULT_URL_BASE = "https://evergreen.mongodb.com"
 
 
@@ -101,7 +104,10 @@ def get_version(base_url, version_id):
     return version
 
 def is_interesting(thing):
-    return thing["status"] != 'success' and thing['status'] != 'undispatched'
+    if GET_ALL_LOGS:
+        return thing['status'] != 'undispatched'
+    else:
+        return thing["status"] != 'success' and thing['status'] != 'undispatched'
 
 def get_failed_tasks(base_url, build_variants):
     print()
@@ -230,7 +236,10 @@ def get_tasks(base_url, tasks, logs_base_dir):
 
     start = time.time()
 
-    futures = (evg_request(base_url, f"/tasks/{task_id}/tests", params={"limit": TASK_TEST_LIMIT,"status": "fail"}, backend=session) for task_id in tasks)
+    params = {"limit": TASK_TEST_LIMIT}
+    if not GET_ALL_LOGS:
+        params["status"] = "fail"
+    futures = (evg_request(base_url, f"/tasks/{task_id}/tests", params=params, backend=session) for task_id in tasks)
 
     all_tests = []
     interesting_test_files = {}
